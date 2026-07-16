@@ -1,35 +1,5 @@
 /**
- * GroupMe Member Management Bot
- * Commands (typed in the group chat):
- *   !add John +15555555555   -> adds that phone number with nickname "John"
- *   !add John (555) 555-5555 -> same, different phone formatting
- *   !add John 555-555-5555   -> same
- *   !add John 5555555555     -> same
- *   !remove Jordan            -> removes the member whose name matches "Jordan"
- *   !list                     -> shows all group members by nickname
- *   !list 5                   -> shows only the first 5 members
- *
- * Phone numbers can be typed in any common US format: with/without country
- * code, with/without dashes, spaces, dots, or parentheses. Anything that
- * doesn't parse gets a help message back instead of failing silently.
- *
- * SETUP (one-time):
- * 1. Deploy this as a Web App (Deploy > New deployment > Web app)
- *    - Execute as: Me
- *    - Who has access: Anyone
- * 2. Copy the web app URL.
- * 3. Create a GroupMe bot at https://dev.groupme.com/bots, set its
- *    Callback URL to that web app URL, and note the bot_id + group_id.
- * 4. Get your GroupMe ACCESS TOKEN (not the bot_id) from
- *    https://dev.groupme.com/ (top of the page once logged in).
- * 5. In the Apps Script editor: Project Settings (gear icon) > Script Properties > Add:
- *      GROUPME_ACCESS_TOKEN = <your access token>
- *      GROUPME_BOT_ID       = <your bot id>
- *      GROUPME_GROUP_ID     = <your group id>
- *    Never put these values directly in this file.
- *
- * Only current members of the group can run !add/!remove (checked against
- * the sender_id on the incoming message) — anyone else's command is ignored.
+ * GroupMe Member Management Bot (multi-group)
  */
 
 function doPost(e) {
@@ -43,13 +13,20 @@ function doPost(e) {
 
     var text = (data.text || '').trim();
     var senderId = data.sender_id;
+    var groupId = data.group_id;
+
+    var ctx = getContext_(groupId);
+    if (!ctx) {
+      Logger.log('No bot configured for group_id: ' + groupId);
+      return ContentService.createTextOutput('ok');
+    }
 
     if (/^!add\s+/i.test(text)) {
-      handleAdd(text, senderId);
+      handleAdd(text, senderId, ctx);
     } else if (/^!remove\s+/i.test(text)) {
-      handleRemove(text, senderId);
+      handleRemove(text, senderId, ctx);
     } else if (/^!list(\s|$)/i.test(text)) {
-      handleList(text, senderId);
+      handleList(text, senderId, ctx);
     }
   } catch (err) {
     Logger.log('Error in doPost: ' + err);
@@ -57,19 +34,57 @@ function doPost(e) {
   return ContentService.createTextOutput('ok');
 }
 
-function getProps_() {
+/**
+ * Builds the { token, botId, groupId } context for a given incoming
+ * group_id, looking up the right bot_id by scanning every script property
+ * named GROUP_1, GROUP_2, etc. Returns null if that group isn't
+ * configured (message is silently ignored).
+ */
+function getContext_(groupId) {
   var props = PropertiesService.getScriptProperties();
   var token = props.getProperty('GROUPME_ACCESS_TOKEN');
-  var botId = props.getProperty('GROUPME_BOT_ID');
-  var groupId = props.getProperty('GROUPME_GROUP_ID');
-  if (!token || !botId || !groupId) {
-    throw new Error('Missing GROUPME_ACCESS_TOKEN / GROUPME_BOT_ID / GROUPME_GROUP_ID script properties.');
+
+  if (!token) {
+    throw new Error('Missing GROUPME_ACCESS_TOKEN script property.');
   }
+
+  var all = props.getProperties();
+  var botId = null;
+
+  for (var key in all) {
+    if (!/^GROUP_\d+$/.test(key)) continue;
+
+    var line = all[key];
+
+    // Strip anything after a "#" — that's a comment, not part of the data.
+    var hashIndex = line.indexOf('#');
+    if (hashIndex !== -1) {
+      line = line.substring(0, hashIndex);
+    }
+    line = line.trim();
+    if (!line) continue;
+
+    var parts = line.split(',');
+    if (parts.length !== 2) continue;
+
+    var lineGroupId = parts[0].trim();
+    var lineBotId = parts[1].trim();
+
+    if (lineGroupId === String(groupId)) {
+      botId = lineBotId;
+      break;
+    }
+  }
+
+  if (!botId) {
+    return null;
+  }
+
   return { token: token, botId: botId, groupId: groupId };
 }
 
-function isCurrentMember_(userId, props) {
-  var url = 'https://api.groupme.com/v3/groups/' + props.groupId + '?token=' + props.token;
+function isCurrentMember_(userId, ctx) {
+  var url = 'https://api.groupme.com/v3/groups/' + ctx.groupId + '?token=' + ctx.token;
   var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
   var json = JSON.parse(resp.getContentText());
   var members = (json.response && json.response.members) || [];
@@ -99,35 +114,33 @@ function extractPhone_(text) {
   return { normalized: '+1' + digits, remainder: text.replace(candidate[0], '').trim() };
 }
 
-function handleAdd(text, senderId) {
-  var props = getProps_();
-
-  if (!isCurrentMember_(senderId, props)) {
-    postMessage_(props, 'Only current group members can add people.');
+function handleAdd(text, senderId, ctx) {
+  if (!isCurrentMember_(senderId, ctx)) {
+    postMessage_(ctx, 'Only current group members can add people.');
     return;
   }
 
   var body = text.replace(/^!add\s*/i, '').trim();
   if (!body) {
-    postMessage_(props, ADD_HELP);
+    postMessage_(ctx, ADD_HELP);
     return;
   }
 
   var phoneInfo = extractPhone_(body);
   if (!phoneInfo) {
-    postMessage_(props, "Couldn't find a valid phone number in that. " + ADD_HELP);
+    postMessage_(ctx, "Couldn't find a valid phone number in that. " + ADD_HELP);
     return;
   }
 
   var nickname = phoneInfo.remainder.trim();
   if (!nickname) {
-    postMessage_(props, 'Missing a name for that number. ' + ADD_HELP);
+    postMessage_(ctx, 'Missing a name for that number. ' + ADD_HELP);
     return;
   }
 
   var phone = phoneInfo.normalized;
 
-  var url = 'https://api.groupme.com/v3/groups/' + props.groupId + '/members/add?token=' + props.token;
+  var url = 'https://api.groupme.com/v3/groups/' + ctx.groupId + '/members/add?token=' + ctx.token;
   var payload = {
     members: [
       { nickname: nickname, phone_number: phone }
@@ -146,39 +159,37 @@ function handleAdd(text, senderId) {
     // Adding is async in GroupMe's API — poll the results endpoint.
     var resultsId = JSON.parse(resp.getContentText()).response.results_id;
     Utilities.sleep(1500);
-    var resultsUrl = 'https://api.groupme.com/v3/groups/' + props.groupId +
-      '/members/results/' + resultsId + '?token=' + props.token;
+    var resultsUrl = 'https://api.groupme.com/v3/groups/' + ctx.groupId +
+      '/members/results/' + resultsId + '?token=' + ctx.token;
     var resultsResp = UrlFetchApp.fetch(resultsUrl, { muteHttpExceptions: true });
     if (resultsResp.getResponseCode() === 200) {
       var added = JSON.parse(resultsResp.getContentText()).response.members || [];
       if (added.length > 0) {
-        postMessage_(props, 'Added ' + (added[0].nickname || phone) + ' to the group.');
+        postMessage_(ctx, 'Added ' + (added[0].nickname || phone) + ' to the group.');
       } else {
-        postMessage_(props, 'Could not add ' + phone + ' — number may already be a member or invalid.');
+        postMessage_(ctx, 'Could not add ' + phone + ' — number may already be a member or invalid.');
       }
     } else {
-      postMessage_(props, 'Add request sent for ' + phone + ', still processing.');
+      postMessage_(ctx, 'Add request sent for ' + phone + ', still processing.');
     }
   } else {
-    postMessage_(props, 'Failed to add ' + phone + ' (error ' + code + ').');
+    postMessage_(ctx, 'Failed to add ' + phone + ' (error ' + code + ').');
   }
 }
 
-function handleRemove(text, senderId) {
-  var props = getProps_();
-
-  if (!isCurrentMember_(senderId, props)) {
-    postMessage_(props, 'Only current group members can remove people.');
+function handleRemove(text, senderId, ctx) {
+  if (!isCurrentMember_(senderId, ctx)) {
+    postMessage_(ctx, 'Only current group members can remove people.');
     return;
   }
 
   var name = text.replace(/^!remove\s*/i, '').trim().toLowerCase();
   if (!name) {
-    postMessage_(props, 'To remove someone text: !remove John');
+    postMessage_(ctx, 'To remove someone text: !remove John');
     return;
   }
 
-  var url = 'https://api.groupme.com/v3/groups/' + props.groupId + '?token=' + props.token;
+  var url = 'https://api.groupme.com/v3/groups/' + ctx.groupId + '?token=' + ctx.token;
   var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
   var members = JSON.parse(resp.getContentText()).response.members || [];
 
@@ -187,35 +198,33 @@ function handleRemove(text, senderId) {
   });
 
   if (!target) {
-    postMessage_(props, 'No member found matching "' + name + '".');
+    postMessage_(ctx, 'No member found matching "' + name + '".');
     return;
   }
 
-  var removeUrl = 'https://api.groupme.com/v3/groups/' + props.groupId +
-    '/members/' + target.id + '/remove?token=' + props.token;
+  var removeUrl = 'https://api.groupme.com/v3/groups/' + ctx.groupId +
+    '/members/' + target.id + '/remove?token=' + ctx.token;
   var removeResp = UrlFetchApp.fetch(removeUrl, {
     method: 'post',
     muteHttpExceptions: true
   });
 
   if (removeResp.getResponseCode() === 200) {
-    postMessage_(props, 'Removed ' + target.nickname + ' from the group.');
+    postMessage_(ctx, 'Removed ' + target.nickname + ' from the group.');
   } else {
-    postMessage_(props, 'Failed to remove ' + target.nickname + ' (error ' + removeResp.getResponseCode() + ').');
+    postMessage_(ctx, 'Failed to remove ' + target.nickname + ' (error ' + removeResp.getResponseCode() + ').');
   }
 }
 
-function handleList(text, senderId) {
-  var props = getProps_();
-
+function handleList(text, senderId, ctx) {
   var match = text.match(/^!list\s*(\d+)?\s*$/i);
   var limit = match && match[1] ? parseInt(match[1], 10) : null;
 
-  var url = 'https://api.groupme.com/v3/groups/' + props.groupId + '?token=' + props.token;
+  var url = 'https://api.groupme.com/v3/groups/' + ctx.groupId + '?token=' + ctx.token;
   var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
 
   if (resp.getResponseCode() !== 200) {
-    postMessage_(props, 'Could not fetch the member list right now.');
+    postMessage_(ctx, 'Could not fetch the member list right now.');
     return;
   }
 
@@ -223,7 +232,7 @@ function handleList(text, senderId) {
   var names = members.map(function (m) { return m.nickname; }).filter(Boolean);
 
   if (names.length === 0) {
-    postMessage_(props, 'No members found.');
+    postMessage_(ctx, 'No members found.');
     return;
   }
 
@@ -235,14 +244,14 @@ function handleList(text, senderId) {
   }
 
   var header = 'Members (' + shown.length + (truncated ? ' of ' + names.length : '') + '):\n';
-  postMessage_(props, header + shown.join('\n'));
+  postMessage_(ctx, header + shown.join('\n'));
 }
 
-function postMessage_(props, text) {
+function postMessage_(ctx, text) {
   UrlFetchApp.fetch('https://api.groupme.com/v3/bots/post', {
     method: 'post',
     contentType: 'application/json',
-    payload: JSON.stringify({ bot_id: props.botId, text: text }),
+    payload: JSON.stringify({ bot_id: ctx.botId, text: text }),
     muteHttpExceptions: true
   });
 }
