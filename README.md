@@ -63,10 +63,14 @@ URL only picks up the version it was created against.
 
 ### 3. Get your access token
 
-Go to [dev.groupme.com](https://dev.groupme.com) and log in — your access
-token is shown at the top of the page. This is different from the bot ID:
-the bot ID lets the bot post messages, but adding/removing members requires
-a real account access token with permission on that group.
+Go to [dev.groupme.com](https://dev.groupme.com), log in, then tap the
+profile icon (circle with your initial) in the top right. A menu will drop
+down with an **Access Token** row — tap **View and copy** next to it to get
+your token.
+
+This is different from the bot ID: the bot ID lets the bot post messages,
+but adding/removing members requires a real account access token with
+permission on that group.
 
 Treat this token like a password. Don't share it or commit it anywhere.
 
