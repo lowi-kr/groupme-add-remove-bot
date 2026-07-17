@@ -2,7 +2,8 @@
 
 A Google Apps Script bot that lets group members add or remove people from a
 GroupMe group directly from the chat — useful now that GroupMe no longer
-supports adding members via SMS.
+supports adding members via their SMS native commands loke #add #remove and listing
+members with #list
 
 Supports being added to **multiple groups** from a single deployment.
 
